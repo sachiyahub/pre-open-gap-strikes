@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Pre-Open Gap Strikes</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+:root { --bg:#0d1117; --panel:#161b22; --border:#30363d; --text:#e6edf3; --muted:#8b949e; --green:#3fb950; --red:#f85149; --blue:#58a6ff; --atm:#1f6feb33; }
+* { box-sizing:border-box; }
+body { margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--text); font-size:13px; }
+header { padding:8px 12px; background:var(--panel); border-bottom:1px solid var(--border); display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+h1 { margin:0; font-size:16px; font-weight:600; }
+.controls { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+input, select, button { background:var(--panel); color:var(--text); border:1px solid var(--border); border-radius:4px; padding:4px 8px; font-size:12px; }
+button { cursor:pointer; }
+button:hover { border-color:var(--blue); }
+table { width:100%; border-collapse:collapse; }
+th, td { padding:4px 6px; text-align:right; border-bottom:1px solid var(--border); white-space:nowrap; }
+th { background:var(--panel); position:sticky; top:0; z-index:2; cursor:pointer; text-align:right; }
+th:first-child, td:first-child { text-align:left; }
+.up { color:var(--green); }
+.down { color:var(--red); }
+.atm { background:var(--atm); font-weight:600; }
+.flip { outline:1px solid var(--blue); }
+#main { display:flex; height:calc(100vh - 48px); }
+#left { width:42%; overflow:auto; border-right:1px solid var(--border); }
+#right { flex:1; overflow:auto; padding:8px; }
+.status { font-size:11px; color:var(--muted); }
+.symbol { cursor:pointer; color:var(--blue); }
+.symbol:hover { text-decoration:underline; }
+.legend { font-size:11px; color:var(--muted); margin:4px 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Pre-Open Gap Strikes</h1>
+  <div class="controls">
+    <input id="search" placeholder="Search symbol" type="search">
+    <label>Gap % ≥ <input id="gapThresh" type="number" value="1" min="0" step="0.1" style="width:60px"></label>
+    <input id="datePick" type="date">
+    <button id="loadBtn">Load</button>
+    <span id="status" class="status">Loading…</span>
+  </div>
+</header>
+<div id="main">
+  <div id="left">
+    <table id="gapTable">
+      <thead><tr>
+        <th data-sort="symbol">Symbol</th>
+        <th data-sort="prev">Prev Close</th>
+        <th data-sort="pre">Pre-Open</th>
+        <th data-sort="gapPts">Gap Pts</th>
+        <th data-sort="gapPct">Gap %</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+  <div id="right">
+    <div id="chainHeader" class="legend">Select a symbol to see expected option opens (Black-Scholes, r=6.5%, prev-day IV, spot=pre-open).</div>
+    <table id="chainTable" style="display:none">
+      <thead><tr>
+        <th>Strike</th>
+        <th>CE Prev</th>
+        <th>CE Exp Open</th>
+        <th>CE Δ</th>
+        <th>PE Prev</th>
+        <th>PE Exp Open</th>
+        <th>PE Δ</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</div>
+<script>
+const API = "/.netlify/functions/nse";
+let allData = [];
+let currentDate = null;
+let sortKey = "gapPct";
+let sortDir = -1;
+
+function istNow() {
+  return new Date(new Date().toLocaleString("en-US", {timeZone:"Asia/Kolkata"}));
+}
+
+function isPreOpenWindow() {
+  const n = istNow();
+  const h = n.getHours(), m = n.getMinutes();
+  return h === 9 && m < 15;
+}
+
+function formatNum(v, d=2) {
+  if (v == null || isNaN(v)) return "–";
+  return Number(v).toLocaleString("en-IN", {minimumFractionDigits:d, maximumFractionDigits:d});
+}
+
+async function fetchPreOpen() {
+  const [idx, stk] = await Promise.all([
+    fetch(`${API}?preopen=1&category=FUTIDX`).then(r=>r.json()),
+    fetch(`${API}?preopen=1&category=FUTSTK`).then(r=>r.json())
+  ]);
+  const rows = [...(idx.data||[]), ...(stk.data||[])];
+  return rows.map(r => ({
+    symbol: r.symbol,
+    prev: r.prevClose,
+    pre: r.iepOrderBook || r.finalPrice || r.IEP,
+    gapPts: (r.iepOrderBook || r.finalPrice || 0) - r.prevClose,
+    gapPct: r.perChange,
+    expiry: r.expiryDate,
+    raw: r
+  })).filter(r => r.pre && r.prev);
+}
+
+function renderTable() {
+  const thresh = parseFloat(document.getElementById("gapThresh").value) || 0;
+  const q = document.getElementById("search").value.toLowerCase();
+  let rows = allData.filter(r => Math.abs(r.gapPct) >= thresh && r.symbol.toLowerCase().includes(q));
+  rows.sort((a,b) => (a[sortKey] > b[sortKey] ? 1 : -1) * sortDir);
+  const tb = document.querySelector("#gapTable tbody");
+  tb.innerHTML = rows.map(r => `
+    <tr>
+      <td class="symbol" data-sym="${r.symbol}">${r.symbol}</td>
+      <td>${formatNum(r.prev)}</td>
+      <td>${formatNum(r.pre)}</td>
+      <td class="${r.gapPts>=0?'up':'down'}">${formatNum(r.gapPts)}</td>
+      <td class="${r.gapPct>=0?'up':'down'}">${formatNum(r.gapPct,2)}%</td>
+    </tr>
+  `).join("");
+  tb.querySelectorAll(".symbol").forEach(el => el.onclick = () => showChain(el.dataset.sym));
+}
+
+document.querySelectorAll("#gapTable th").forEach(th => {
+  th.onclick = () => {
+    const k = th.dataset.sort;
+    if (sortKey === k) sortDir *= -1; else { sortKey = k; sortDir = -1; }
+    renderTable();
+  };
+});
+
+document.getElementById("search").oninput = renderTable;
+document.getElementById("gapThresh").onchange = renderTable;
+
+async function getCurrentMonthExpiry(symbol) {
+  const info = await fetch(`${API}?expiries=1&symbol=${symbol}`).then(r=>r.json());
+  const dates = info.expiryDates || [];
+  const today = istNow();
+  const future = dates.map(d => new Date(d.replace(/-/g," "))).filter(d => d > today);
+  if (!future.length) return dates[dates.length-1];
+  const nearestMonth = future[0].getMonth();
+  const inMonth = future.filter(d => d.getMonth() === nearestMonth);
+  return inMonth[inMonth.length-1].toLocaleDateString("en-GB", {day:"2-digit", month:"short", year:"numeric"}).replace(/ /g,"-");
+}
+
+function normCdf(x) {
+  const a1=0.254829592, a2=-0.284496736, a3=1.421413741, a4=-1.453152027, a5=1.061405429, p=0.3275911;
+  const sign = x < 0 ? -1 : 1;
+  x = Math.abs(x)/Math.SQRT2;
+  const t = 1/(1+p*x);
+  const y = 1 - (((((a5*t+a4)*t)+a3)*t+a2)*t+a1)*t*Math.exp(-x*x);
+  return 0.5*(1+sign*y);
+}
+function bsPrice(S, K, T, r, sigma, type) {
+  if (T<=0) return Math.max(0, type==="CE" ? S-K : K-S);
+  const d1 = (Math.log(S/K) + (r + 0.5*sigma*sigma)*T) / (sigma*Math.sqrt(T));
+  const d2 = d1 - sigma*Math.sqrt(T);
+  if (type==="CE") return S*normCdf(d1) - K*Math.exp(-r*T)*normCdf(d2);
+  return K*Math.exp(-r*T)*normCdf(-d2) - S*normCdf(-d1);
+}
+
+async function showChain(symbol) {
+  const row = allData.find(r => r.symbol === symbol);
+  if (!row) return;
+  document.getElementById("chainHeader").textContent = `${symbol} · Pre-open ${formatNum(row.pre)} (prev ${formatNum(row.prev)}, gap ${formatNum(row.gapPct)}%) · loading chain…`;
+  const expiry = await getCurrentMonthExpiry(symbol);
+  const type = ["NIFTY","BANKNIFTY","FINNIFTY","MIDCPNIFTY"].includes(symbol) ? "Indices" : "Equity";
+  const oc = await fetch(`${API}?optionchain=1&symbol=${symbol}&type=${type}&expiry=${encodeURIComponent(expiry)}`).then(r=>r.json());
+  const data = (oc.records && oc.records.data) || [];
+  const strikes = data.map(d => ({
+    strike: d.strikePrice,
+    cePrev: d.CE && d.CE.lastPrice,
+    ceIV: d.CE && d.CE.impliedVolatility,
+    pePrev: d.PE && d.PE.lastPrice,
+    peIV: d.PE && d.PE.impliedVolatility
+  })).filter(s => s.strike);
+  const atm = strikes.reduce((best, s) => Math.abs(s.strike - row.pre) < Math.abs(best.strike - row.pre) ? s : best, strikes[0] || {strike:0});
+  const idx = strikes.findIndex(s => s.strike === atm.strike);
+  const from = Math.max(0, idx-10), to = Math.min(strikes.length, idx+11);
+  const subset = strikes.slice(from, to);
+  const days = Math.max(1, Math.round((new Date(expiry.replace(/-/g," ")) - istNow()) / 86400000));
+  const T = days / 365;
+  const r = 0.065;
+  const prevSpot = row.prev;
+  const newSpot = row.pre;
+  const tb = document.querySelector("#chainTable tbody");
+  tb.innerHTML = subset.map(s => {
+    const ceExp = bsPrice(newSpot, s.strike, T, r, (s.ceIV||0)/100, "CE");
+    const peExp = bsPrice(newSpot, s.strike, T, r, (s.peIV||0)/100, "PE");
+    const wasITM_CE = prevSpot > s.strike;
+    const nowITM_CE = newSpot > s.strike;
+    const wasITM_PE = prevSpot < s.strike;
+    const nowITM_PE = newSpot < s.strike;
+    const flip = (wasITM_CE !== nowITM_CE) || (wasITM_PE !== nowITM_PE);
+    const isAtm = s.strike === atm.strike;
+    return `<tr class="${isAtm?'atm':''} ${flip?'flip':''}">
+      <td>${formatNum(s.strike,0)}${isAtm?' ATM':''}</td>
+      <td>${formatNum(s.cePrev)}</td>
+      <td>${formatNum(ceExp)}</td>
+      <td class="${ceExp-s.cePrev>=0?'up':'down'}">${formatNum(ceExp - (s.cePrev||0))}</td>
+      <td>${formatNum(s.pePrev)}</td>
+      <td>${formatNum(peExp)}</td>
+      <td class="${peExp-s.pePrev>=0?'up':'down'}">${formatNum(peExp - (s.pePrev||0))}</td>
+    </tr>`;
+  }).join("");
+  document.getElementById("chainTable").style.display = "";
+  document.getElementById("chainHeader").innerHTML = `${symbol} · current-month expiry ${expiry} · new ATM ${formatNum(atm.strike,0)} · days to exp ≈ ${days}<br>
+    <span class="legend">ATM row highlighted. Blue outline = strike flips OTM↔ITM on the gap. Expected open = BS(spot=pre-open, IV=prev close IV, r=6.5%).</span>`;
+}
+
+async function loadLive() {
+  document.getElementById("status").textContent = "Fetching live pre-open…";
+  allData = await fetchPreOpen();
+  currentDate = istNow().toISOString().slice(0,10);
+  await fetch(`${API}?snapshot=1`, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({date:currentDate, data:allData})}).catch(()=>{});
+  renderTable();
+  document.getElementById("status").textContent = `Live · ${allData.length} symbols · ${istNow().toLocaleTimeString("en-IN")}`;
+  document.getElementById("datePick").value = currentDate;
+}
+
+async function loadDate(date) {
+  document.getElementById("status").textContent = `Loading snapshot ${date}…`;
+  const res = await fetch(`${API}?snapshot=1&date=${date}`);
+  const data = await res.json();
+  if (data) {
+    allData = data;
+    currentDate = date;
+    renderTable();
+    document.getElementById("status").textContent = `Snapshot ${date} · ${allData.length} symbols`;
+  } else {
+    document.getElementById("status").textContent = `No snapshot for ${date}`;
+    allData = [];
+    renderTable();
+  }
+}
+
+document.getElementById("loadBtn").onclick = () => {
+  const d = document.getElementById("datePick").value;
+  if (d) loadDate(d);
+};
+
+async function init() {
+  if (isPreOpenWindow()) {
+    await loadLive();
+    setInterval(() => { if (isPreOpenWindow()) loadLive(); }, 15000);
+  } else {
+    const listRes = await fetch(`${API}?snapshot=1`);
+    const dates = await listRes.json();
+    if (dates && dates.length) {
+      await loadDate(dates[0]);
+    } else {
+      document.getElementById("status").textContent = "No snapshots yet. Open during 9:00–9:15 IST to capture.";
+    }
+  }
+}
+init();
+</script>
+</body>
+</html>

@@ -1,0 +1,6 @@
+{
+  "name": "pre-open-gap-strikes",
+  "dependencies": {
+    "@netlify/blobs": "^8.1.0"
+  }
+}
